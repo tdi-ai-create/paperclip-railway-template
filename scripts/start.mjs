@@ -231,12 +231,33 @@ function proxy(req, res) {
     },
   };
 
+  // Add a timeout for /api/health to prevent the frontend from hanging forever
+  // if the Paperclip health check blocks on a DB connection issue
+  const isHealthCheck = req.url === "/api/health" || req.url.startsWith("/api/health?");
+  const HEALTH_TIMEOUT_MS = 5000;
+
   const upstream = httpRequest(opts, (upRes) => {
+    if (healthTimer) clearTimeout(healthTimer);
+    if (res.headersSent) return; // timeout already fired
     res.writeHead(upRes.statusCode, upRes.headers);
     upRes.pipe(res, { end: true });
   });
 
+  let healthTimer = null;
+  if (isHealthCheck) {
+    healthTimer = setTimeout(() => {
+      if (!res.headersSent) {
+        console.warn("[proxy] /api/health timed out after 5s — returning synthetic OK");
+        upstream.destroy();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", source: "wrapper-timeout" }));
+      }
+    }, HEALTH_TIMEOUT_MS);
+  }
+
   upstream.on("error", () => {
+    if (healthTimer) clearTimeout(healthTimer);
+    if (res.headersSent) return;
     res.writeHead(502, { "Content-Type": "text/plain" });
     res.end("Paperclip is restarting — please refresh in a moment.");
   });

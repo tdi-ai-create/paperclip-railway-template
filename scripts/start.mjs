@@ -18,7 +18,7 @@
  */
 
 import { createServer, request as httpRequest } from "http";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, chmodSync } from "fs";
 import { spawn } from "child_process";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -116,11 +116,91 @@ function writeConfig() {
 
 // ── Paperclip process ─────────────────────────────────────────────────────────
 
+// ── TDI Hub Sync Tools ──────────────────────────────────────────────────────
+// Creates wrapper scripts in /paperclip/bin/ that agents call to sync content
+// to the TDI Learning Hub. Runs once on startup, idempotent.
+
+function installSyncTools() {
+  const binDir = join(HOME, "bin");
+  const envFile = join(HOME, ".sync-env");
+
+  try {
+    if (!existsSync(binDir)) mkdirSync(binDir, { recursive: true });
+
+    // Env file with API credentials
+    writeFileSync(envFile, [
+      'export TDI_SYNC_KEY="tdi-sync-4c94b4195bb0c6272772e0ea6dd9c318"',
+      'export TDI_API_BASE="https://www.teachersdeserveit.com"',
+    ].join("\n") + "\n");
+
+    // tdi-create-draft
+    writeFileSync(join(binDir, "tdi-create-draft"), `#!/bin/bash
+source ${envFile}
+curl -s -X POST "$TDI_API_BASE/api/hub/content-sync" \\
+  -H "Authorization: Bearer $TDI_SYNC_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d "{\\"action\\":\\"create_draft\\",\\"title\\":\\"$1\\",\\"slug\\":\\"$2\\",\\"description\\":\\"$3\\",\\"category\\":\\"$\{4:-Classroom Tools}\\",\\"topic_tags\\":$\{5:-[\\"classroom-management\\"]},\\"roles\\":$\{6:-[\\"teacher\\"]},\\"danielson_domains\\":$\{7:-[\\"3-instruction\\"]},\\"lift\\":\\"$\{8:-LOW}\\",\\"access_tier\\":\\"$\{9:-professional}\\"}"
+echo ""
+`);
+    chmodSync(join(binDir, "tdi-create-draft"), 0o755);
+
+    // tdi-upload-pdf
+    writeFileSync(join(binDir, "tdi-upload-pdf"), `#!/bin/bash
+source ${envFile}
+QW_ID="$1"; PDF_PATH="$2"
+if [ ! -f "$PDF_PATH" ]; then echo "Error: File not found: $PDF_PATH"; exit 1; fi
+FILENAME=$(basename "$PDF_PATH")
+PDF_B64=$(base64 -w0 "$PDF_PATH" 2>/dev/null || base64 "$PDF_PATH")
+curl -s -X POST "$TDI_API_BASE/api/hub/content-sync" \\
+  -H "Authorization: Bearer $TDI_SYNC_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d "{\\"action\\":\\"upload_pdf\\",\\"id\\":\\"$QW_ID\\",\\"pdf_base64\\":\\"$PDF_B64\\",\\"filename\\":\\"$FILENAME\\"}"
+echo ""
+`);
+    chmodSync(join(binDir, "tdi-upload-pdf"), 0o755);
+
+    // tdi-seed-community
+    writeFileSync(join(binDir, "tdi-seed-community"), `#!/bin/bash
+source ${envFile}
+curl -s -X POST "$TDI_API_BASE/api/hub/community/seed" \\
+  -H "Authorization: Bearer $TDI_SYNC_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d "{\\"quick_win_id\\":\\"$1\\",\\"user_id\\":\\"$2\\",\\"contribution_type\\":\\"$3\\",\\"body\\":\\"$4\\"}"
+echo ""
+`);
+    chmodSync(join(binDir, "tdi-seed-community"), 0o755);
+
+    // tdi-status
+    writeFileSync(join(binDir, "tdi-status"), `#!/bin/bash
+source ${envFile}
+echo "=== Hub Content Pipeline Status ==="
+curl -s "$TDI_API_BASE/api/hub/content-sync?action=get_status" -H "Authorization: Bearer $TDI_SYNC_KEY"
+echo ""
+echo "=== Drafts ==="
+curl -s "$TDI_API_BASE/api/hub/content-sync?action=list_drafts" -H "Authorization: Bearer $TDI_SYNC_KEY" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for draft in d.get('drafts',[]):
+    flags = []
+    if not draft.get('has_pdf'): flags.append('NEEDS PDF')
+    if not draft.get('has_description'): flags.append('NEEDS DESC')
+    print(f'  {draft[\"title\"]} [{\", \".join(flags) if flags else \"READY\"}]')
+" 2>/dev/null || echo "(parse error)"
+`);
+    chmodSync(join(binDir, "tdi-status"), 0o755);
+
+    console.log("[tdi-sync] Installed sync tools in /paperclip/bin/");
+  } catch (err) {
+    console.error("[tdi-sync] Failed to install sync tools:", err.message);
+  }
+}
+
 function startPaperclip() {
   if (paperclipProc) return; // already running
 
   console.log(`\n🚀 Starting Paperclip on internal port ${PAPERCLIP_PORT}...\n`);
 
+  installSyncTools();
   writeConfig();
 
   paperclipProc = spawn(
@@ -231,14 +311,14 @@ function proxy(req, res) {
     },
   };
 
-  // Add a timeout for /api/health to prevent the frontend from hanging forever
-  // if the Paperclip health check blocks on a DB connection issue
+  // Health check timeout: return 503 (not fake 200) so the external
+  // watchdog gets honest data about Paperclip's actual state.
   const isHealthCheck = req.url === "/api/health" || req.url.startsWith("/api/health?");
-  const HEALTH_TIMEOUT_MS = 5000;
+  const HEALTH_TIMEOUT_MS = 8000;
 
   const upstream = httpRequest(opts, (upRes) => {
     if (healthTimer) clearTimeout(healthTimer);
-    if (res.headersSent) return; // timeout already fired
+    if (res.headersSent) return;
     res.writeHead(upRes.statusCode, upRes.headers);
     upRes.pipe(res, { end: true });
   });
@@ -247,10 +327,10 @@ function proxy(req, res) {
   if (isHealthCheck) {
     healthTimer = setTimeout(() => {
       if (!res.headersSent) {
-        console.warn("[proxy] /api/health timed out after 5s — returning synthetic OK");
+        console.warn("[proxy] /api/health timed out after 8s — returning 503");
         upstream.destroy();
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", source: "wrapper-timeout" }));
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "degraded", source: "wrapper-timeout", message: "Health check took >8s" }));
       }
     }, HEALTH_TIMEOUT_MS);
   }

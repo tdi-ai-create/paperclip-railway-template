@@ -195,12 +195,78 @@ for draft in d.get('drafts',[]):
   }
 }
 
+// ── Backup cleanup ──────────────────────────────────────────────────────────
+// Paperclip writes an hourly SQL dump to data/backups and never prunes it.
+// Unpruned, that fills the 46G volume in about ten days.
+//
+// This lives here, in the long-lived supervisor process, on purpose. The
+// Aug 12 2026 fix put the same cleanup in a `while true; do sleep; done &`
+// subshell launched from an interactive `railway ssh` session. That subshell
+// died with the SSH session, so it never pruned once, the volume hit 100% on
+// Aug 22, and 47 consecutive backups silently wrote 0 bytes. A schedule is
+// only as durable as the process that owns it.
+
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly, matches the dump cadence
+let cleanupTimer = null;
+
+function installBackupCleanup() {
+  const binDir = join(HOME, "bin");
+  const scriptPath = join(binDir, "cleanup-backups.sh");
+
+  try {
+    if (!existsSync(binDir)) mkdirSync(binDir, { recursive: true });
+
+    // Empty dumps are deleted BEFORE the keep-newest-N rule. A full disk
+    // produces 0-byte dumps, and since those are the newest files, a naive
+    // "keep newest 24" would retain the empty ones and delete every valid
+    // backup. That turns a disk-full incident into a data-loss incident.
+    writeFileSync(scriptPath, `#!/bin/sh
+BACKUP_DIR="${HOME}/instances/default/data/backups"
+LOG="${HOME}/instances/default/data/cleanup.log"
+KEEP=24
+
+if [ -d "$BACKUP_DIR" ]; then
+  cd "$BACKUP_DIR" || exit 0
+  find . -maxdepth 1 -type f -name '*.sql' -size 0 -delete 2>/dev/null
+  ls -t *.sql 2>/dev/null | tail -n +$((KEEP + 1)) | xargs rm -f 2>/dev/null
+  KEPT=$(ls -1 *.sql 2>/dev/null | wc -l)
+else
+  KEPT=0
+fi
+
+find ${HOME}/instances/default/data/run-logs/ -type f -mtime +7 -delete 2>/dev/null
+find /home/node/.claude/projects/*/memory/ -type f -mtime +30 -delete 2>/dev/null
+
+# Leave evidence that this ran. An unproven schedule is how we got here.
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) prune ok: kept=\${KEPT} disk=$(df -h ${HOME} 2>/dev/null | awk 'NR==2{print $5}')" >> "$LOG" 2>/dev/null
+tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG" 2>/dev/null
+`);
+    chmodSync(scriptPath, 0o755);
+    console.log("[cleanup] Installed backup cleanup in /paperclip/bin/");
+  } catch (err) {
+    console.error("[cleanup] Failed to install cleanup script:", err.message);
+    return;
+  }
+
+  const runCleanup = () => {
+    const proc = spawn("sh", [scriptPath], { stdio: ["ignore", "ignore", "pipe"] });
+    proc.stderr.on("data", (d) => console.error("[cleanup]", d.toString().trim()));
+    proc.on("error", (err) => console.error("[cleanup] run failed:", err.message));
+  };
+
+  runCleanup(); // once at boot, so a restart always reclaims space
+  if (cleanupTimer) clearInterval(cleanupTimer);
+  cleanupTimer = setInterval(runCleanup, CLEANUP_INTERVAL_MS);
+  console.log("[cleanup] Scheduled hourly, owned by the supervisor process");
+}
+
 function startPaperclip() {
   if (paperclipProc) return; // already running
 
   console.log(`\n🚀 Starting Paperclip on internal port ${PAPERCLIP_PORT}...\n`);
 
   installSyncTools();
+  installBackupCleanup();
   writeConfig();
 
   paperclipProc = spawn(

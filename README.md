@@ -96,3 +96,31 @@ Once Paperclip is running, this wrapper is transparent — it just passes throug
 
 **Paperclip starts but agents can't connect**
 → Make sure `PAPERCLIP_DEPLOYMENT_EXPOSURE=public` is set so the server accepts external connections.
+
+## Why the CLI versions are pinned
+
+`@anthropic-ai/claude-code` is pinned, deliberately, and must stay pinned.
+
+npm resolves `latest` when the image is **built**, not when it runs. So a
+container can sit on one version for weeks and then jump many versions the
+next time anything triggers a rebuild, with no code change and no warning.
+
+That is exactly what happened on 26 August 2026. The image had been frozen on
+2.1.229 since 12 August and every agent ran fine. A rebuild that day
+re-resolved `latest` to 2.1.247, which changed how the CLI drops privileges,
+and every heartbeat began failing after one second with:
+
+```
+Claude exited with code 1: error: failed switching to "node": operation not permitted
+```
+
+All 18 agents were dead for four days before anyone noticed, because a failing
+heartbeat looks identical to an idle one from the outside.
+
+2.1.229 is the version proven to work in this container. Before changing it,
+deploy to a copy and confirm an agent heartbeat completes, rather than assuming
+a newer release is compatible.
+
+`@openai/codex` is still unpinned and carries the same risk on the next
+rebuild. It was left alone only because the releases from that period are
+platform-specific alphas, so pinning it needs its own verification.

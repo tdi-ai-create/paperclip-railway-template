@@ -97,30 +97,57 @@ Once Paperclip is running, this wrapper is transparent — it just passes throug
 **Paperclip starts but agents can't connect**
 → Make sure `PAPERCLIP_DEPLOYMENT_EXPOSURE=public` is set so the server accepts external connections.
 
-## Why the CLI versions are pinned
+## What took the fleet down on 26 August 2026
 
-`@anthropic-ai/claude-code` is pinned, deliberately, and must stay pinned.
-
-npm resolves `latest` when the image is **built**, not when it runs. So a
-container can sit on one version for weeks and then jump many versions the
-next time anything triggers a rebuild, with no code change and no warning.
-
-That is exactly what happened on 26 August 2026. The image had been frozen on
-2.1.229 since 12 August and every agent ran fine. A rebuild that day
-re-resolved `latest` to 2.1.247, which changed how the CLI drops privileges,
-and every heartbeat began failing after one second with:
+All 18 agents failed every heartbeat after exactly one second, from 26 to 30
+August, with:
 
 ```
 Claude exited with code 1: error: failed switching to "node": operation not permitted
 ```
 
-All 18 agents were dead for four days before anyone noticed, because a failing
-heartbeat looks identical to an idle one from the outside.
+**That message is gosu's, not Claude's.** gosu formats its fatal error as
+`failed switching to %q: %v`. If you ever see it again, look for a privilege
+drop, not for Claude.
 
-2.1.229 is the version proven to work in this container. Before changing it,
-deploy to a copy and confirm an agent heartbeat completes, rather than assuming
-a newer release is compatible.
+The privilege drop lived in `/paperclip/bin/claude-as-node`. Every agent's
+adapter Command field points at that path, so it runs on every heartbeat, but
+it existed only on the Railway volume. It was never committed. That is why four
+days of reading `git log` found nothing: the broken file was not in the repo.
 
-`@openai/codex` is still unpinned and carries the same risk on the next
-rebuild. It was left alone only because the releases from that period are
-platform-specific alphas, so pinning it needs its own verification.
+It failed for two independent reasons:
+
+- It ended with `exec gosu node ...`. Paperclip runs as `paperclip`, uid 999.
+  A non-root process cannot setuid, so this returned EPERM every time.
+- It bootstrapped its binary with `cp /root/.local/bin/claude`, a hand-installed
+  copy in root's home that uid 999 could not read and that no longer existed.
+
+**Pinning `@anthropic-ai/claude-code` did not fix it, and could not have.** The
+pin governs `/app/node_modules`, but the shim executed a binary from root's
+home instead. An earlier version of this file blamed a rebuild resolving
+`latest` to 2.1.247 and a change in how the CLI drops privileges. That was a
+guess, and it was wrong. The pin was live and active while the failures
+continued.
+
+The wrapper now lives at `scripts/claude-as-node`, is installed into
+`/paperclip/bin/` by `start.mjs` on every boot, runs no privilege switch, and
+executes `/app/node_modules/.bin/claude`.
+
+## Why the CLI versions are pinned
+
+`@anthropic-ai/claude-code`, `@openai/codex` and `paperclipai` are all pinned,
+and `package-lock.json` is committed.
+
+npm resolves ranges when the image is **built**, not when it runs. So a
+container can sit on one version for weeks and then jump many versions the next
+time anything triggers a rebuild, with no code change and no warning. Pinning
+the direct dependencies alone does not close this, because every transitive
+dependency still floats. The lockfile plus `npm ci` is what actually closes it.
+
+2.1.229 and codex 0.151.0 are the versions proven to work in this container.
+Before changing either, deploy to a copy and confirm an agent heartbeat
+completes, rather than assuming a newer release is compatible.
+
+Because the wrapper now runs the binary out of `node_modules`, the pin in
+`package.json` is finally the thing that executes. Verify with
+`/paperclip/bin/claude-as-node --version` inside the container.

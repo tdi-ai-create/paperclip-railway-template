@@ -195,6 +195,33 @@ for draft in d.get('drafts',[]):
   }
 }
 
+// ── Claude wrapper ──────────────────────────────────────────────────────────
+// Every agent's adapter Command points at /paperclip/bin/claude-as-node, so
+// that file is on the critical path for all 18 agents. It used to exist only
+// on the volume, uncommitted, and it took the fleet down for four days in
+// August 2026 while the repo showed no changes at all. Installing it from
+// scripts/ on every boot puts it under review and makes a volume loss
+// self-healing. See scripts/claude-as-node for the failure it encodes.
+//
+// This overwrites on every boot on purpose: a hand-edit on the volume should
+// not outlive a restart.
+
+function installClaudeWrapper() {
+  const binDir = join(HOME, "bin");
+  const dest = join(binDir, "claude-as-node");
+  const src = join(__dirname, "claude-as-node");
+
+  try {
+    if (!existsSync(binDir)) mkdirSync(binDir, { recursive: true });
+    writeFileSync(dest, readFileSync(src));
+    chmodSync(dest, 0o755);
+    console.log("[claude-wrapper] Installed claude-as-node in /paperclip/bin/");
+  } catch (err) {
+    // Loud, because every agent fails without this.
+    console.error("[claude-wrapper] FAILED to install claude-as-node:", err.message);
+  }
+}
+
 // ── Backup cleanup ──────────────────────────────────────────────────────────
 // Paperclip writes an hourly SQL dump to data/backups and never prunes it.
 // Unpruned, that fills the 46G volume in about ten days.
@@ -266,6 +293,7 @@ function startPaperclip() {
   console.log(`\n🚀 Starting Paperclip on internal port ${PAPERCLIP_PORT}...\n`);
 
   installSyncTools();
+  installClaudeWrapper();
   installBackupCleanup();
   writeConfig();
 

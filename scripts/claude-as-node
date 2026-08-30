@@ -1,0 +1,49 @@
+#!/bin/bash
+#
+# The Claude binary every Paperclip agent actually invokes.
+#
+# Each agent's adapter "Command" field is set to /paperclip/bin/claude-as-node,
+# so this file, not `claude`, is what runs on every heartbeat. start.mjs
+# installs it into /paperclip/bin/ on boot, the same way it installs the tdi-*
+# wrappers.
+#
+# It is in the repo because the previous copy was not. That version existed
+# only on the Railway volume, was never committed, and took the whole fleet
+# down from 26 to 30 August 2026 while `git log` showed nothing had changed.
+#
+# What it used to do, and why both halves were wrong:
+#
+#   exec gosu node /usr/local/bin/claude "$@"
+#     Paperclip runs as `paperclip`, uid 999. A non-root process cannot setuid,
+#     so this returned EPERM on every single invocation:
+#       error: failed switching to "node": operation not permitted
+#     That string is gosu's, not Claude's. 92 consecutive one-second failures.
+#
+#   cp /root/.local/bin/claude /usr/local/bin/claude
+#     A hand-installed binary in root's home, unreadable by uid 999 and by then
+#     gone entirely. Because this bypassed node_modules, pinning
+#     @anthropic-ai/claude-code in package.json had no effect on what executed.
+#     Two sessions lost days to version theories on account of it.
+#
+# So: no privilege switch, and the binary comes from node_modules, which makes
+# the pin in package.json the thing that actually runs.
+#
+# The name is now inaccurate. It is kept only because 18 agent configs point at
+# this exact path. Renaming means editing all 18.
+
+CLAUDE_BIN="${CLAUDE_BIN:-/app/node_modules/.bin/claude}"
+
+if [ ! -x "$CLAUDE_BIN" ]; then
+  echo "claude-as-node: $CLAUDE_BIN is missing or not executable" >&2
+  echo "claude-as-node: running as uid $(id -u), cwd $(pwd)" >&2
+  exit 127
+fi
+
+# Claude refuses --dangerously-skip-permissions as root, which is the reason a
+# privilege drop existed here at all. If this ever runs as root again, take the
+# documented container escape hatch instead of dropping privileges.
+if [ "$(id -u)" = "0" ]; then
+  export IS_SANDBOX=1
+fi
+
+exec "$CLAUDE_BIN" "$@"

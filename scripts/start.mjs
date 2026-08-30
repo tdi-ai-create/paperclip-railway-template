@@ -222,6 +222,34 @@ function installClaudeWrapper() {
   }
 }
 
+// ── Agent liveness watchdog ─────────────────────────────────────────────────
+// From 26 to 30 Aug 2026 every agent failed every heartbeat and nothing told
+// anyone, because a dead agent and an idle agent look identical. This polls for
+// "zero successful runs in N hours" and posts to Slack.
+//
+// Owned by the supervisor for the same reason the backup prune is: a schedule
+// is only as durable as the process that owns it.
+
+const LIVENESS_INTERVAL_MS = 30 * 60 * 1000;
+const LIVENESS_FIRST_DELAY_MS = 5 * 60 * 1000; // let agents get going after a boot
+let livenessTimer = null;
+
+function installAgentLivenessWatchdog() {
+  const run = async () => {
+    try {
+      const { checkAgentLiveness } = await import("./agent-liveness-check.mjs");
+      await checkAgentLiveness({});
+    } catch (err) {
+      console.error("[liveness] check failed:", err.message);
+    }
+  };
+
+  setTimeout(run, LIVENESS_FIRST_DELAY_MS);
+  if (livenessTimer) clearInterval(livenessTimer);
+  livenessTimer = setInterval(run, LIVENESS_INTERVAL_MS);
+  console.log("[liveness] Watchdog scheduled every 30m, owned by the supervisor");
+}
+
 // ── Backup cleanup ──────────────────────────────────────────────────────────
 // Paperclip writes an hourly SQL dump to data/backups and never prunes it.
 // Unpruned, that fills the 46G volume in about ten days.
@@ -295,6 +323,7 @@ function startPaperclip() {
   installSyncTools();
   installClaudeWrapper();
   installBackupCleanup();
+  installAgentLivenessWatchdog();
   writeConfig();
 
   paperclipProc = spawn(

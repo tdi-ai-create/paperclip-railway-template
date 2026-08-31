@@ -22,7 +22,7 @@
  *   node scripts/agent-liveness-check.mjs --dry-run
  */
 
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
 import { join } from "path";
 import pkg from "pg";
 
@@ -47,10 +47,35 @@ function readState() {
 }
 
 function writeState(state) {
+  const body = JSON.stringify(state, null, 2);
   try {
-    writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+    writeFileSync(STATE_PATH, body);
+    return;
   } catch (err) {
-    console.error("[liveness] could not persist state:", err.message);
+    // This happened on the first deploy: the state file ended up owned by root
+    // while the supervisor runs as paperclip (uid 999), so every write failed
+    // with EACCES and the old code logged one line and moved on.
+    //
+    // Losing this file is worse than it looks. Without `alertedAt` the re-alert
+    // window collapses, so a real outage would page every 30 minutes instead of
+    // every 6, and the recovery notice never fires because it keys off the same
+    // field. An alarm that cries every half hour gets muted, which defeats the
+    // entire point of this script.
+    //
+    // A file owned by someone else cannot be overwritten, but it CAN be
+    // unlinked, because the parent directory is owned by the runtime user. So
+    // remove and recreate rather than giving up.
+    try {
+      if (existsSync(STATE_PATH)) unlinkSync(STATE_PATH);
+      writeFileSync(STATE_PATH, body);
+      console.warn(`[liveness] state file was not writable (${err.code || err.message}), recreated it`);
+      return;
+    } catch (retryErr) {
+      console.error(
+        "[liveness] STATE NOT PERSISTED, alert de-duplication is disabled and outages will repeat-alert:",
+        retryErr.message
+      );
+    }
   }
 }
 

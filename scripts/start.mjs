@@ -213,7 +213,24 @@ function installClaudeWrapper() {
 
   try {
     if (!existsSync(binDir)) mkdirSync(binDir, { recursive: true });
-    writeFileSync(dest, readFileSync(src));
+    const body = readFileSync(src);
+
+    try {
+      writeFileSync(dest, body);
+    } catch (writeErr) {
+      // If this file ends up owned by another user, every boot write fails with
+      // EACCES and all 18 agents lose their wrapper. That exact thing happened
+      // to the liveness state file on the first deploy of this change. A file
+      // owned by someone else cannot be overwritten, but it CAN be unlinked,
+      // because binDir is owned by the runtime user. Remove and recreate rather
+      // than leaving the fleet without a wrapper.
+      if (existsSync(dest)) unlinkSync(dest);
+      writeFileSync(dest, body);
+      console.warn(
+        `[claude-wrapper] existing file was not writable (${writeErr.code || writeErr.message}), recreated it`
+      );
+    }
+
     chmodSync(dest, 0o755);
     console.log("[claude-wrapper] Installed claude-as-node in /paperclip/bin/");
   } catch (err) {

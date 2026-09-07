@@ -127,9 +127,13 @@ function installSyncTools() {
   try {
     if (!existsSync(binDir)) mkdirSync(binDir, { recursive: true });
 
-    // Env file with API credentials
+    // Env file with API credentials.
+    // No literal key here. The value comes from the secret Paperclip binds as
+    // TDI_SYNC_KEY; this only fills it in if it is missing, and never overrides
+    // an injected value. Hardcoding it gave the variable a second source that
+    // silently diverged from the first when the secret was rotated.
     writeFileSync(envFile, [
-      'export TDI_SYNC_KEY="tdi-sync-4c94b4195bb0c6272772e0ea6dd9c318"',
+      'export TDI_SYNC_KEY="${TDI_SYNC_KEY:-$PAPERCLIP_SYNC_KEY}"',
       'export TDI_API_BASE="https://www.teachersdeserveit.com"',
     ].join("\n") + "\n");
 

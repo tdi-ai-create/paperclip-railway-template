@@ -8,9 +8,19 @@ if [ -d "/paperclip" ]; then
 fi
 
 # ── Layer 1: Write env file that agents can source ──
-# This makes the sync key available to Claude Code agents via `source /paperclip/.sync-env`
+# This used to hardcode the sync key. That gave the same variable two sources
+# with two different values: Paperclip injects the bound secret into the agent,
+# and then any wrapper script sourcing this file overwrote it with the literal
+# below. When the Paperclip secret was rotated on 1 September the two stopped
+# matching, so a call made through a wrapper succeeded and the identical call
+# made directly returned 401. That is the flapping recorded on TEA-266 and
+# TEA-270, which read as an outage that kept fixing and unfixing itself.
+#
+# The key now has exactly one source: the secret Paperclip binds as
+# TDI_SYNC_KEY. This file only fills it in if it is somehow absent, and never
+# overrides a value that is already there.
 cat > /paperclip/.sync-env << 'ENVFILE'
-export TDI_SYNC_KEY="tdi-sync-4c94b4195bb0c6272772e0ea6dd9c318"
+export TDI_SYNC_KEY="${TDI_SYNC_KEY:-$PAPERCLIP_SYNC_KEY}"
 export TDI_API_BASE="https://www.teachersdeserveit.com"
 ENVFILE
 chmod 644 /paperclip/.sync-env

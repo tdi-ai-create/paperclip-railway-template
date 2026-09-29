@@ -1,7 +1,12 @@
 FROM node:20-slim
 
-# Install gosu for privilege dropping in entrypoint
-RUN apt-get update && apt-get install -y --no-install-recommends gosu && rm -rf /var/lib/apt/lists/*
+# gosu: privilege dropping in entrypoint.
+# git: engineering agents cannot build without it. Chris already has Bash, Read
+# and Edit, and an empty workspace with no git was the whole reason 44 [BUILD]
+# tickets sat queued behind a human. Installed in the image rather than at boot
+# because only /paperclip persists; anything apt-installed at runtime is gone on
+# the next deploy, the same trap that lost the backups.
+RUN apt-get update && apt-get install -y --no-install-recommends gosu git && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user (required: Claude CLI refuses --dangerously-skip-permissions as root)
 RUN groupadd -r paperclip && useradd -r -g paperclip -m -d /home/paperclip -s /bin/bash paperclip

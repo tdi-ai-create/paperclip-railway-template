@@ -6,7 +6,17 @@ FROM node:20-slim
 # tickets sat queued behind a human. Installed in the image rather than at boot
 # because only /paperclip persists; anything apt-installed at runtime is gone on
 # the next deploy, the same trap that lost the backups.
-RUN apt-get update && apt-get install -y --no-install-recommends gosu git && rm -rf /var/lib/apt/lists/*
+# ca-certificates: git alone is not enough. With no CA bundle, cloning over HTTPS
+# dies on "server certificate verification failed. CAfile: none", which is exactly
+# what happened on the first clone attempt after git landed. node:20-slim ships no
+# CA store; Node does not need one because it bundles its own roots, which is why
+# nothing noticed until a non-Node tool made an outbound TLS call.
+#
+# curl: agents already reach for it. Chris ran `curl -s -H ...` on 28 Sep, and when
+# that failed he ran `which wget node python3 python`, found only node, and fell
+# back to `node -e` one-liners for every HTTP call. Supplying curl removes a
+# pointless detour, and it needs the same CA bundle git does.
+RUN apt-get update && apt-get install -y --no-install-recommends gosu git ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user (required: Claude CLI refuses --dangerously-skip-permissions as root)
 RUN groupadd -r paperclip && useradd -r -g paperclip -m -d /home/paperclip -s /bin/bash paperclip
